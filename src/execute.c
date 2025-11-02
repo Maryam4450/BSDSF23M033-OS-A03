@@ -1,24 +1,16 @@
+/* execute.c can remain minimal because execution logic is in shell.c's execute_pipeline.
+   Provide a stub for compatibility if other code called execute_command previously. */
+
 #include "shell.h"
 
-int execute(char* arglist[]) {
-    int status;
-    pid_t cpid = fork();
-
-    if (cpid < 0) {
-        perror("fork failed");
-        return -1;
-    }
-
-    if (cpid == 0) { // Child
-        execvp(arglist[0], arglist);
-        perror("Command not found"); // execvp only returns on failure
-        exit(1);
-    } else { // Parent
-        waitpid(cpid, &status, 0);
-        return 0;
-    }
+/* If some code calls execute_command(argc), keep compatibility */
+void execute_command(char **args) {
+    cmd_t single;
+    single.argv = args;
+    single.infile = NULL;
+    single.outfile = NULL;
+    execute_pipeline(&single, 1);
 }
-
 
 
 
