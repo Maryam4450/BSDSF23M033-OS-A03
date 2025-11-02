@@ -1,8 +1,10 @@
-# Makefile for ROLL_NO-OS-A03 Shell Project
+# Makefile for ROLL NO-OS-A03 Shell Project
+# Feature 4: Tab Completion with Readline
 
 # Compiler and flags
 CC = gcc
 CFLAGS = -Wall -g -Iinclude
+LDFLAGS = -lreadline
 
 # Directories
 SRC_DIR = src
@@ -22,7 +24,7 @@ all: $(TARGET)
 # Link object files to create executable
 $(TARGET): $(OBJS)
 	@mkdir -p $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS)
+	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS) $(LDFLAGS)
 
 # Compile each source file to object file
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
