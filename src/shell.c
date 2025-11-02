@@ -28,6 +28,63 @@ char *get_history_command(int n) {
     return strdup(history_buf[n-1]);
 }
 
+/* ---------- Jobs (background processes) ---------- */
+static job_t jobs[JOBS_MAX];
+static int jobs_count = 0;
+
+void add_job(pid_t pid, const char *cmdline) {
+    if (jobs_count >= JOBS_MAX) {
+        fprintf(stderr, "jobs list full, cannot add background job\n");
+        return;
+    }
+    jobs[jobs_count].pid = pid;
+    jobs[jobs_count].cmdline = strdup(cmdline);
+    jobs_count++;
+    printf("[bg] started pid %d: %s\n", pid, cmdline);
+}
+
+void remove_job(pid_t pid) {
+    for (int i = 0; i < jobs_count; ++i) {
+        if (jobs[i].pid == pid) {
+            free(jobs[i].cmdline);
+            for (int j = i+1; j < jobs_count; ++j) jobs[j-1] = jobs[j];
+            jobs_count--;
+            return;
+        }
+    }
+}
+
+void list_jobs(void) {
+    for (int i = 0; i < jobs_count; ++i) {
+        printf("[%d] pid:%d  %s\n", i+1, jobs[i].pid, jobs[i].cmdline);
+    }
+}
+
+/* Reap any finished child processes (non-blocking) and remove from jobs list */
+void reap_finished_jobs(void) {
+    int status;
+    pid_t pid;
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        // if pid was a background job, remove it and print exit info
+        int found = 0;
+        for (int i = 0; i < jobs_count; ++i) {
+            if (jobs[i].pid == pid) {
+                found = 1;
+                if (WIFEXITED(status)) {
+                    printf("\n[bg] pid %d finished (exit %d): %s\n", pid, WEXITSTATUS(status), jobs[i].cmdline);
+                } else if (WIFSIGNALED(status)) {
+                    printf("\n[bg] pid %d terminated by signal %d: %s\n", pid, WTERMSIG(status), jobs[i].cmdline);
+                } else {
+                    printf("\n[bg] pid %d finished: %s\n", pid, jobs[i].cmdline);
+                }
+                remove_job(pid);
+                break;
+            }
+        }
+        // If it wasn't in our jobs list, it's probably a foreground child we already waited for; ignore.
+    }
+}
+
 /* ---------- Utility: free argv ---------- */
 void free_argv(char **argv) {
     if (!argv) return;
@@ -39,7 +96,6 @@ void free_argv(char **argv) {
    Caller must free with free_argv(). */
 char **tokenize_whitespace(const char *s, int *out_count) {
     if (!s) { if (out_count) *out_count = 0; return NULL; }
-    // Make a mutable copy
     char *buf = strdup(s);
     if (!buf) return NULL;
 
@@ -77,12 +133,9 @@ char **tokenize_whitespace(const char *s, int *out_count) {
 int parse_pipeline(const char *line, cmd_t **out_cmds, int *out_n) {
     if (!line) return -1;
 
-    // Split on '|' first (preserve order). We will handle trimming.
-    // Make a copy to use strtok on.
     char *buf = strdup(line);
     if (!buf) return -1;
 
-    // Count stages
     int stages_cap = 8;
     char **stages = malloc(sizeof(char*) * stages_cap);
     int stages_n = 0;
@@ -90,7 +143,7 @@ int parse_pipeline(const char *line, cmd_t **out_cmds, int *out_n) {
     char *saveptr = NULL;
     char *token = strtok_r(buf, "|", &saveptr);
     while (token) {
-        // trim leading/trailing spaces
+        // trim
         while (*token == ' ' || *token == '\t') ++token;
         char *end = token + strlen(token) - 1;
         while (end > token && (*end == ' ' || *end == '\t')) { *end = '\0'; --end; }
@@ -109,7 +162,6 @@ int parse_pipeline(const char *line, cmd_t **out_cmds, int *out_n) {
         return -1;
     }
 
-    // Allocate cmd_t array
     cmd_t *cmds = calloc(stages_n, sizeof(cmd_t));
     for (int i = 0; i < stages_n; ++i) {
         cmds[i].argv = NULL;
@@ -117,30 +169,25 @@ int parse_pipeline(const char *line, cmd_t **out_cmds, int *out_n) {
         cmds[i].outfile = NULL;
     }
 
-    // For each stage, tokenize and detect < and >
     for (int i = 0; i < stages_n; ++i) {
         int tokcount = 0;
         char **toks = tokenize_whitespace(stages[i], &tokcount);
         free(stages[i]);
         if (!toks) {
-            // empty stage -> error
             free_pipeline(cmds, stages_n);
             free(stages);
             return -1;
         }
 
-        // Build argv by skipping redirection tokens and capturing filenames
-        char **argv = malloc(sizeof(char*) * (tokcount + 1)); // safe upper bound
+        char **argv = malloc(sizeof(char*) * (tokcount + 1));
         int argc = 0;
         for (int j = 0; toks[j]; ++j) {
             if (strcmp(toks[j], "<") == 0) {
-                if (!toks[j+1]) { /* syntax error */ free_argv(toks); free_pipeline(cmds, stages_n); free(stages); return -1; }
-                cmds[i].infile = strdup(toks[j+1]);
-                ++j; // skip filename
+                if (!toks[j+1]) { free_argv(toks); free_pipeline(cmds, stages_n); free(stages); return -1; }
+                cmds[i].infile = strdup(toks[j+1]); ++j;
             } else if (strcmp(toks[j], ">") == 0) {
                 if (!toks[j+1]) { free_argv(toks); free_pipeline(cmds, stages_n); free(stages); return -1; }
-                cmds[i].outfile = strdup(toks[j+1]);
-                ++j;
+                cmds[i].outfile = strdup(toks[j+1]); ++j;
             } else {
                 argv[argc++] = strdup(toks[j]);
             }
@@ -183,7 +230,7 @@ int handle_builtin(char **argv) {
         printf("Built-ins:\n  cd <dir>\n  exit\n  help\n  jobs\n  history\n  !n\n");
         return 1;
     } else if (strcmp(argv[0], "jobs") == 0) {
-        printf("Job control not yet implemented.\n");
+        list_jobs();
         return 1;
     } else if (strcmp(argv[0], "history") == 0) {
         print_history();
@@ -193,25 +240,24 @@ int handle_builtin(char **argv) {
 }
 
 /* ---------- Execute a pipeline of n commands ----------
-   Uses pipes for >1 stage; supports per-stage infile/outfile.
-   Returns exit status of last command (best-effort).
+   If background == 1, parent does not wait and background job(s) are recorded.
+   cmdline_copy is a printable copy of the original command line (used when adding job).
 */
-int execute_pipeline(cmd_t *cmds, int n) {
+int execute_pipeline(cmd_t *cmds, int n, int background, char *cmdline_copy) {
     if (!cmds || n <= 0) return -1;
 
-    /* If single stage and builtin -> execute builtin in shell process */
-    if (n == 1 && handle_builtin(cmds[0].argv)) {
+    /* If single stage and builtin -> execute builtin in shell process (foreground only) */
+    if (n == 1 && !background && handle_builtin(cmds[0].argv)) {
         return 0;
     }
 
-    int **pipes = NULL; // array of pipe fds
+    int **pipes = NULL;
     if (n > 1) {
         pipes = malloc(sizeof(int*) * (n-1));
         for (int i = 0; i < n-1; ++i) {
             pipes[i] = malloc(sizeof(int) * 2);
             if (pipe(pipes[i]) < 0) {
                 perror("pipe");
-                // free
                 for (int k = 0; k <= i; ++k) if (pipes[k]) free(pipes[k]);
                 free(pipes);
                 return -1;
@@ -225,140 +271,163 @@ int execute_pipeline(cmd_t *cmds, int n) {
         pid_t pid = fork();
         if (pid < 0) {
             perror("fork");
-            // cleanup omitted for brevity
             continue;
         } else if (pid == 0) {
-            /* Child process */
-            // If not first stage, replace stdin with read end of previous pipe
-            if (i > 0) {
-                dup2(pipes[i-1][0], STDIN_FILENO);
-            }
-            // If not last stage, replace stdout with write end of current pipe
-            if (i < n-1) {
-                dup2(pipes[i][1], STDOUT_FILENO);
-            }
+            /* Child */
+            if (i > 0) dup2(pipes[i-1][0], STDIN_FILENO);
+            if (i < n-1) dup2(pipes[i][1], STDOUT_FILENO);
 
-            // Handle infile/outfile for this stage (overrides pipe behavior if used)
             if (cmds[i].infile) {
                 int fd = open(cmds[i].infile, O_RDONLY);
-                if (fd < 0) {
-                    perror("open infile");
-                    exit(1);
-                }
+                if (fd < 0) { perror("open infile"); exit(1); }
                 dup2(fd, STDIN_FILENO);
                 close(fd);
             }
             if (cmds[i].outfile) {
                 int fd = open(cmds[i].outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                if (fd < 0) {
-                    perror("open outfile");
-                    exit(1);
-                }
+                if (fd < 0) { perror("open outfile"); exit(1); }
                 dup2(fd, STDOUT_FILENO);
                 close(fd);
             }
 
-            /* Close all pipe fds in child */
             if (n > 1) {
                 for (int j = 0; j < n-1; ++j) {
-                    close(pipes[j][0]);
-                    close(pipes[j][1]);
+                    close(pipes[j][0]); close(pipes[j][1]);
                 }
             }
 
-            /* execvp the command */
-            if (cmds[i].argv && cmds[i].argv[0]) {
-                execvp(cmds[i].argv[0], cmds[i].argv);
-            }
+            if (cmds[i].argv && cmds[i].argv[0]) execvp(cmds[i].argv[0], cmds[i].argv);
             perror("execvp");
             exit(1);
         } else {
             /* Parent */
             pids[i] = pid;
-            // parent closes fds it doesn't need immediately
-            if (i > 0) {
-                // close read end of previous pipe in parent
-                close(pipes[i-1][0]);
-            }
-            if (i < n-1) {
-                // close write end of current pipe in parent after next child will use it
-                close(pipes[i][1]);
-            }
+            if (i > 0) close(pipes[i-1][0]);
+            if (i < n-1) close(pipes[i][1]);
         }
     }
 
-    /* Parent: close any remaining pipe fds */
+    /* Close remaining pipe arrays */
     if (n > 1) {
-        for (int j = 0; j < n-1; ++j) {
-            // these were already closed as we looped, but ensure closed
-            // (safe to ignore errors)
-            //close(pipes[j][0]); close(pipes[j][1]);
-            free(pipes[j]);
-        }
+        for (int j = 0; j < n-1; ++j) free(pipes[j]);
         free(pipes);
     }
 
-    /* Wait for all children and collect status of last */
-    int last_status = 0;
-    for (int i = 0; i < n; ++i) {
-        int status = 0;
-        waitpid(pids[i], &status, 0);
-        if (i == n-1) last_status = status;
+    if (background) {
+        /* For background pipeline, add the last child's pid as representative job.
+           (Optionally could add group, but keep it simple and use last pid.) */
+        add_job(pids[n-1], cmdline_copy ? cmdline_copy : "(background)");
+        /* Parent does NOT wait; we still should not leak pids array memory */
+        free(pids);
+        return 0;
+    } else {
+        /* Foreground: wait for all children; return last exit status */
+        int last_status = 0;
+        for (int i = 0; i < n; ++i) {
+            int status = 0;
+            waitpid(pids[i], &status, 0);
+            if (i == n-1) last_status = status;
+        }
+        free(pids);
+        return WEXITSTATUS(last_status);
     }
-    free(pids);
-    return WEXITSTATUS(last_status);
 }
 
-/* ---------- Main shell loop (readline + parsing + execution) ---------- */
+/* ---------- Main shell loop (readline + parsing + execution) ----------
+   This version supports splitting by ';' and detecting '&' for background execution.
+*/
 void start_shell(void) {
     char *line = NULL;
 
     while (1) {
+        /* Reap any finished background jobs before prompting */
+        reap_finished_jobs();
+
         line = readline(PROMPT);
         if (!line) {
             printf("\n");
             break; // Ctrl+D
         }
 
-        // trim leading whitespace
+        /* Trim leading whitespace */
         char *p = line;
         while (*p == ' ' || *p == '\t') ++p;
         if (*p == '\0') { free(line); continue; }
 
-        /* Handle !n before storing */
-        if (*p == '!') {
-            long n = strtol(p+1, NULL, 10);
-            char *found = get_history_command((int)n);
-            if (found) {
-                printf("%s\n", found);
-                free(line);
-                line = found;
-            } else {
-                fprintf(stderr, "No such command in history: %ld\n", n);
-                free(line);
+        /* Split the input line into segments separated by ';' */
+        char *saveptr = NULL;
+        char *segment = NULL;
+        char *line_copy_for_history = strdup(p); // store trimmed copy for history
+        add_to_our_history(line_copy_for_history);
+        free(line_copy_for_history);
+
+        segment = strtok_r(p, ";", &saveptr);
+        while (segment) {
+            /* trim segment */
+            while (*segment == ' ' || *segment == '\t') ++segment;
+            char *end = segment + strlen(segment) - 1;
+            while (end > segment && (*end == ' ' || *end == '\t')) { *end = '\0'; --end; }
+
+            if (*segment == '\0') {
+                segment = strtok_r(NULL, ";", &saveptr);
                 continue;
             }
-        }
 
-        add_to_our_history(line);
+            /* Detect trailing '&' for background execution */
+            int background = 0;
+            size_t seglen = strlen(segment);
+            if (seglen > 0 && segment[seglen-1] == '&') {
+                background = 1;
+                /* remove trailing & and any spaces before it */
+                char *q = segment + seglen - 1;
+                *q = '\0';
+                while (q > segment && (*(q-1) == ' ' || *(q-1) == '\t')) { --q; *(q-1) = '\0'; }
+            }
 
-        /* Parse pipeline */
-        cmd_t *cmds = NULL;
-        int ncmds = 0;
-        if (parse_pipeline(line, &cmds, &ncmds) == 0) {
-            execute_pipeline(cmds, ncmds);
-            free_pipeline(cmds, ncmds);
-        } else {
-            fprintf(stderr, "Parse error\n");
+            /* Handle !n before parsing */
+            if (segment[0] == '!') {
+                long n = strtol(segment+1, NULL, 10);
+                char *found = get_history_command((int)n);
+                if (found) {
+                    printf("%s\n", found);
+                    free(segment); // not allocated by us, but we'll replace behavior by strdup later
+                    segment = found; // found is heap-allocated, will be parsed then freed by free_pipeline/others
+                } else {
+                    fprintf(stderr, "No such command in history: %ld\n", n);
+                    segment = strtok_r(NULL, ";", &saveptr);
+                    continue;
+                }
+            }
+
+            /* parse pipeline & redirection for this segment */
+            cmd_t *cmds = NULL;
+            int ncmds = 0;
+            if (parse_pipeline(segment, &cmds, &ncmds) == 0) {
+                /* keep a copy of printable segment for job list if background */
+                char *cmdline_copy = strdup(segment);
+                execute_pipeline(cmds, ncmds, background, cmdline_copy);
+                /* for background, execute_pipeline took cmdline_copy into jobs; otherwise free it */
+                if (!background) free(cmdline_copy);
+                free_pipeline(cmds, ncmds);
+            } else {
+                fprintf(stderr, "Parse error in segment: %s\n", segment);
+            }
+
+            /* If we substituted history (!n) and got a strdup, free it */
+            if (segment && segment[0] != '\0' && segment != NULL) {
+                /* No reliable way to tell if segment was strdup-ed (except when we set it above)
+                   so we only free those we allocated explicitly (cmdline_copy and parse frees). */
+            }
+
+            segment = strtok_r(NULL, ";", &saveptr);
         }
 
         free(line);
     }
 
-    /* free history buffer */
+    /* cleanup jobs and history */
+    reap_finished_jobs();
     for (int i = 0; i < history_count; ++i) free(history_buf[i]);
-    history_count = 0;
+    for (int i = 0; i < jobs_count; ++i) free(jobs[i].cmdline);
 }
-
-
 

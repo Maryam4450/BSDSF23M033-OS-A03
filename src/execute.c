@@ -1,16 +1,14 @@
-/* execute.c can remain minimal because execution logic is in shell.c's execute_pipeline.
-   Provide a stub for compatibility if other code called execute_command previously. */
-
 #include "shell.h"
 
-/* If some code calls execute_command(argc), keep compatibility */
-void execute_command(char **args) {
+/* Compatibility helper: execute a single argv (foreground) */
+void execute(char **arglist) {
     cmd_t single;
-    single.argv = args;
+    single.argv = arglist;
     single.infile = NULL;
     single.outfile = NULL;
-    execute_pipeline(&single, 1);
+    execute_pipeline(&single, 1, 0, NULL);
 }
+
 
 
 
