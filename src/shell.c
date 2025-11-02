@@ -20,7 +20,6 @@ char* read_cmd(char* prompt, FILE* fp) {
 }
 
 char** tokenize(char* cmdline) {
-    // Edge case: empty command line
     if (cmdline == NULL || cmdline[0] == '\0' || cmdline[0] == '\n') {
         return NULL;
     }
@@ -39,7 +38,7 @@ char** tokenize(char* cmdline) {
     while (*cp != '\0' && argnum < MAXARGS) {
         while (*cp == ' ' || *cp == '\t') cp++; // Skip leading whitespace
         
-        if (*cp == '\0') break; // Line was only whitespace
+        if (*cp == '\0') break;
 
         start = cp;
         len = 1;
@@ -51,8 +50,8 @@ char** tokenize(char* cmdline) {
         argnum++;
     }
 
-    if (argnum == 0) { // No arguments were parsed
-        for(int i = 0; i < MAXARGS + 1; i++) free(arglist[i]);
+    if (argnum == 0) {
+        for (int i = 0; i < MAXARGS + 1; i++) free(arglist[i]);
         free(arglist);
         return NULL;
     }
@@ -60,3 +59,47 @@ char** tokenize(char* cmdline) {
     arglist[argnum] = NULL;
     return arglist;
 }
+
+/* ------------------------------------------------------------------
+   Handle built-in commands: exit, cd, help, jobs
+   Returns 1 if handled, 0 if not.
+------------------------------------------------------------------ */
+int handle_builtin(char **arglist) {
+    if (arglist == NULL || arglist[0] == NULL)
+        return 0;
+
+    // exit command
+    if (strcmp(arglist[0], "exit") == 0) {
+        printf("Exiting shell...\n");
+        exit(0);
+    }
+
+    // cd command
+    if (strcmp(arglist[0], "cd") == 0) {
+        if (arglist[1] == NULL) {
+            fprintf(stderr, "cd: missing argument\n");
+        } else if (chdir(arglist[1]) != 0) {
+            perror("cd failed");
+        }
+        return 1;
+    }
+
+    // help command
+    if (strcmp(arglist[0], "help") == 0) {
+        printf("Built-in commands:\n");
+        printf("  cd <dir>   - Change directory\n");
+        printf("  exit       - Exit the shell\n");
+        printf("  help       - Show this help message\n");
+        printf("  jobs       - Show background jobs (not implemented yet)\n");
+        return 1;
+    }
+
+    // jobs command
+    if (strcmp(arglist[0], "jobs") == 0) {
+        printf("Job control not yet implemented.\n");
+        return 1;
+    }
+
+    return 0; // not a built-in command
+}
+

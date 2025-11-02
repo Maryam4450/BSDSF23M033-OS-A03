@@ -8,6 +8,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <strings.h>
 
 #define MAX_LEN 512
 #define MAXARGS 10
@@ -18,5 +19,6 @@
 char* read_cmd(char* prompt, FILE* fp);
 char** tokenize(char* cmdline);
 int execute(char** arglist);
+int handle_builtin(char **arglist);
 
 #endif // SHELL_H
