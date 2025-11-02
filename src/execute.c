@@ -2,21 +2,23 @@
 
 int execute(char* arglist[]) {
     int status;
-    int cpid = fork();
+    pid_t cpid = fork();
 
-    switch (cpid) {
-        case -1:
-            perror("fork failed");
-            exit(1);
+    if (cpid < 0) {
+        perror("fork failed");
+        return -1;
+    }
 
-        case 0: // Child process
-            execvp(arglist[0], arglist);
-            perror("Command not found"); // Only runs if execvp fails
-            exit(1);
-
-        default: // Parent process
-            waitpid(cpid, &status, 0);
-            return 0;
+    if (cpid == 0) { // Child
+        execvp(arglist[0], arglist);
+        perror("Command not found"); // execvp only returns on failure
+        exit(1);
+    } else { // Parent
+        waitpid(cpid, &status, 0);
+        return 0;
     }
 }
+
+
+
 
