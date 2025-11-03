@@ -310,8 +310,15 @@ int handle_builtin(char **argv) {
         }
         return 1;
     } else if (strcmp(argv[0], "help") == 0) {
-        printf("Built-ins:\n  cd <dir>\n  exit\n  help\n  jobs\n  history\n  set\n  !n\n");
-        return 1;
+        printf("myshell built-in commands:\n");
+        printf("  cd <dir>     - change directory\n");
+        printf("  exit         - exit shell\n");
+        printf("  help         - show this help message\n");
+        printf("  history      - show command history\n");
+        printf("  !n           - execute nth command from history\n");
+        printf("  jobs         - show running background jobs (future)\n");
+	printf("  set          - show all shell variables\n");
+	return 1;
     } else if (strcmp(argv[0], "jobs") == 0) {
         list_jobs();
         return 1;
