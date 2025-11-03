@@ -33,6 +33,13 @@ typedef struct {
     char *cmdline;
 } job_t;
 
+/* Shell variable (linked list) */
+typedef struct var_s {
+    char *name;
+    char *value;
+    struct var_s *next;
+} var_t;
+
 /* Top-level shell control */
 void start_shell(void);
 
@@ -57,10 +64,18 @@ void remove_job(pid_t pid);
 void list_jobs(void);
 void reap_finished_jobs(void);
 
+/* Variable management */
+void set_var(const char *name, const char *value);
+char *get_var(const char *name); /* returns malloc'd string (caller must free) or NULL */
+void print_vars(void);
+int is_assignment_token(const char *token);
+void handle_assignment(const char *assign_str);
+
 /* Compatibility wrapper */
 void execute_command(char **args); /* convenience wrapper to execute single argv */
 
 #endif
+
 
 
 

@@ -80,6 +80,106 @@ void reap_finished_jobs(void) {
     }
 }
 
+/* ------------------------ Variables (linked list) ------------------------ */
+static var_t *vars_head = NULL;
+
+static char *strdup_safe(const char *s) {
+    if (!s) return NULL;
+    char *r = strdup(s);
+    if (!r) { perror("strdup"); exit(1); }
+    return r;
+}
+
+void set_var(const char *name, const char *value) {
+    if (!name) return;
+    // validate name start (alpha or underscore)
+    if (!( (name[0] >= 'A' && name[0] <= 'Z') ||
+           (name[0] >= 'a' && name[0] <= 'z') ||
+           (name[0] == '_') )) {
+        fprintf(stderr, "invalid variable name: %s\n", name);
+        return;
+    }
+
+    var_t *cur = vars_head;
+    while (cur) {
+        if (strcmp(cur->name, name) == 0) {
+            free(cur->value);
+            cur->value = strdup_safe(value ? value : "");
+            return;
+        }
+        cur = cur->next;
+    }
+    // not found: create
+    var_t *n = malloc(sizeof(var_t));
+    n->name = strdup_safe(name);
+    n->value = strdup_safe(value ? value : "");
+    n->next = vars_head;
+    vars_head = n;
+}
+
+char *get_var(const char *name) {
+    if (!name) return NULL;
+    var_t *cur = vars_head;
+    while (cur) {
+        if (strcmp(cur->name, name) == 0) {
+            return strdup_safe(cur->value); /* caller must free */
+        }
+        cur = cur->next;
+    }
+    return NULL;
+}
+
+void print_vars(void) {
+    var_t *cur = vars_head;
+    while (cur) {
+        printf("%s=%s\n", cur->name, cur->value);
+        cur = cur->next;
+    }
+}
+
+/* detect a simple assignment token like NAME=VALUE (no spaces) */
+int is_assignment_token(const char *token) {
+    if (!token) return 0;
+    const char *eq = strchr(token, '=');
+    if (!eq) return 0;
+    // ensure no spaces (tokenization ensures that) and name isn't empty
+    if (eq == token) return 0;
+    // optional: validate name chars
+    return 1;
+}
+
+/* parse assignment string and set variable; handles quoted values: VAR="Hello world" or VAR=val */
+void handle_assignment(const char *assign_str) {
+    if (!assign_str) return;
+    const char *eq = strchr(assign_str, '=');
+    if (!eq) return;
+    int namelen = eq - assign_str;
+    char *name = malloc(namelen + 1);
+    memcpy(name, assign_str, namelen);
+    name[namelen] = '\0';
+
+    const char *valstart = eq + 1;
+    char *value = NULL;
+    // strip surrounding quotes if present
+    if (*valstart == '"' || *valstart == '\'') {
+        char quote = *valstart;
+        size_t len = strlen(valstart);
+        if (len >= 2 && valstart[len-1] == quote) {
+            value = strndup(valstart+1, len-2);
+        } else {
+            // unmatched quote: take rest as-is (without first quote)
+            value = strdup(valstart+1);
+        }
+    } else {
+        value = strdup(valstart);
+    }
+
+    // set var
+    set_var(name, value);
+    free(name);
+    free(value);
+}
+
 /* ------------------------ Utilities ------------------------ */
 void free_argv(char **argv) {
     if (!argv) return;
@@ -87,7 +187,6 @@ void free_argv(char **argv) {
     free(argv);
 }
 
-/* Tokenize by whitespace (returns NULL-terminated array). Caller frees with free_argv(). */
 char **tokenize_whitespace(const char *s, int *out_count) {
     if (!s) { if (out_count) *out_count = 0; return NULL; }
     char *buf = strdup(s);
@@ -211,7 +310,7 @@ int handle_builtin(char **argv) {
         }
         return 1;
     } else if (strcmp(argv[0], "help") == 0) {
-        printf("Built-ins:\n  cd <dir>\n  exit\n  help\n  jobs\n  history\n  !n\n");
+        printf("Built-ins:\n  cd <dir>\n  exit\n  help\n  jobs\n  history\n  set\n  !n\n");
         return 1;
     } else if (strcmp(argv[0], "jobs") == 0) {
         list_jobs();
@@ -219,8 +318,49 @@ int handle_builtin(char **argv) {
     } else if (strcmp(argv[0], "history") == 0) {
         print_history();
         return 1;
+    } else if (strcmp(argv[0], "set") == 0) {
+        print_vars();
+        return 1;
     }
     return 0;
+}
+
+/* ------------------------ Variable expansion ------------------------
+   For each cmd argv starting with '$', replace with value if exists, else empty string.
+   Returns 0 on success.
+*/
+static void expand_variables_in_cmds(cmd_t *cmds, int n) {
+    for (int i = 0; i < n; ++i) {
+        char **argv = cmds[i].argv;
+        if (!argv) continue;
+        for (int j = 0; argv[j]; ++j) {
+            char *a = argv[j];
+            if (a[0] == '$' && strlen(a) >= 2) {
+                const char *name = a + 1;
+                char *val = get_var(name); // malloc'd or NULL
+                free(argv[j]);
+                if (val) {
+                    argv[j] = val; // assign malloc'd string
+                } else {
+                    argv[j] = strdup(""); // empty string if undefined
+                }
+            } else {
+                /* Also support ${VAR} syntax */
+                if (a[0] == '$' && a[1] == '{') {
+                    char *end = strchr(a+2, '}');
+                    if (end) {
+                        int namelen = end - (a+2);
+                        char *name = strndup(a+2, namelen);
+                        char *val = get_var(name);
+                        free(name);
+                        free(argv[j]);
+                        if (val) argv[j] = val;
+                        else argv[j] = strdup("");
+                    }
+                }
+            }
+        }
+    }
 }
 
 /* ------------------------ Execute pipeline ------------------------ */
@@ -228,6 +368,9 @@ int handle_builtin(char **argv) {
    cmdline_copy is a printable copy used for job description when background. */
 int execute_pipeline(cmd_t *cmds, int n, int background, char *cmdline_copy) {
     if (!cmds || n <= 0) return -1;
+
+    /* Expand variables before execution */
+    expand_variables_in_cmds(cmds, n);
 
     /* if single-stage and not background and builtin, run in shell */
     if (n == 1 && !background && handle_builtin(cmds[0].argv)) {
@@ -291,9 +434,7 @@ int execute_pipeline(cmd_t *cmds, int n, int background, char *cmdline_copy) {
     }
 
     if (n > 1) {
-        for (int j = 0; j < n-1; ++j) {
-            free(pipes[j]);
-        }
+        for (int j = 0; j < n-1; ++j) free(pipes[j]);
         free(pipes);
     }
 
@@ -352,7 +493,7 @@ static int read_if_block(char ***then_lines, int *then_count, char ***else_lines
                 if (*else_count >= else_cap) { else_cap *= 2; *else_lines = realloc(*else_lines, sizeof(char*) * else_cap); }
                 (*else_lines)[(*else_count)++] = strdup(p);
             } else {
-                /* lines before then are ignored (or could be error) */
+                /* ignore lines before then */
             }
         }
         free(line);
@@ -360,19 +501,43 @@ static int read_if_block(char ***then_lines, int *then_count, char ***else_lines
     return 0;
 }
 
-/* execute_lines: run array of lines (each may be full pipeline/chaining). background flag passed to execute_pipeline calls. */
+/* execute_lines: run array of lines (each may be pipeline/chaining). background flag passed to execute_pipeline calls. */
 static void execute_lines(char **lines, int n, int background) {
     for (int i = 0; i < n; ++i) {
-        cmd_t *cmds = NULL;
-        int ncmds = 0;
-        if (parse_pipeline(lines[i], &cmds, &ncmds) == 0) {
-            char *copy = strdup(lines[i]);
-            execute_pipeline(cmds, ncmds, background, copy);
-            if (!background) free(copy);
-            free_pipeline(cmds, ncmds);
-        } else {
-            fprintf(stderr, "Parse error in line: %s\n", lines[i]);
+        /* Each line may include ; chaining, so mimic outer logic: split on ; */
+        char *segment_copy = strdup(lines[i]);
+        char *saveptr = NULL;
+        char *seg = strtok_r(segment_copy, ";", &saveptr);
+        while (seg) {
+            while (*seg == ' ' || *seg == '\t') ++seg;
+            char *end = seg + strlen(seg) - 1;
+            while (end > seg && (*end == ' ' || *end == '\t')) { *end = '\0'; --end; }
+            if (*seg == '\0') { seg = strtok_r(NULL, ";", &saveptr); continue; }
+
+            /* detect assignment first */
+            int is_assign = 0;
+            char **tokens = tokenize_whitespace(seg, NULL);
+            if (tokens && tokens[0] && is_assignment_token(tokens[0]) && (tokens[1] == NULL)) {
+                is_assign = 1;
+                handle_assignment(tokens[0]);
+            }
+            if (tokens) free_argv(tokens);
+            if (is_assign) { seg = strtok_r(NULL, ";", &saveptr); continue; }
+
+            cmd_t *cmds = NULL;
+            int ncmds = 0;
+            if (parse_pipeline(seg, &cmds, &ncmds) == 0) {
+                char *copy = strdup(seg);
+                execute_pipeline(cmds, ncmds, background, copy);
+                if (!background) free(copy);
+                free_pipeline(cmds, ncmds);
+            } else {
+                fprintf(stderr, "Parse error in then/else line: %s\n", seg);
+            }
+
+            seg = strtok_r(NULL, ";", &saveptr);
         }
+        free(segment_copy);
     }
 }
 
@@ -457,27 +622,58 @@ void start_shell(void) {
                 while (q > segment && (*(q-1) == ' ' || *(q-1) == '\t')) { --q; *(q) = '\0'; }
             }
 
+            /* Handle simple assignment: single token matching NAME=VALUE */
+            int handled_assignment = 0;
+            char **tokens = tokenize_whitespace(segment, NULL);
+            if (tokens && tokens[0] && is_assignment_token(tokens[0]) && tokens[1] == NULL) {
+                handle_assignment(tokens[0]);
+                handled_assignment = 1;
+            }
+            if (tokens) free_argv(tokens);
+            if (handled_assignment) { segment = strtok_r(NULL, ";", &saveptr); continue; }
+
             /* handle !n substitution before parsing */
             if (segment[0] == '!') {
                 long n = strtol(segment+1, NULL, 10);
                 char *found = get_history_command((int)n);
                 if (found) {
                     printf("%s\n", found);
-                    /* replace segment content pointer with found (heap allocated) */
-                    char *tmp = strdup(found);
+                    /* execute found text (may contain chaining) */
+                    char *found_copy = strdup(found);
                     free(found);
-                    /* use tmp as the segment content for parse_pipeline */
-                    cmd_t *cmds = NULL;
-                    int ncmds = 0;
-                    if (parse_pipeline(tmp, &cmds, &ncmds) == 0) {
-                        char *copy = strdup(tmp);
-                        execute_pipeline(cmds, ncmds, background, copy);
-                        if (!background) free(copy);
-                        free_pipeline(cmds, ncmds);
-                    } else {
-                        fprintf(stderr, "Parse error in history expansion: %s\n", tmp);
+                    /* recursively process found_copy as a line: split by ; */
+                    char *seg2_save = NULL;
+                    char *seg2 = strtok_r(found_copy, ";", &seg2_save);
+                    while (seg2) {
+                        while (*seg2 == ' ' || *seg2 == '\t') ++seg2;
+                        char *end2 = seg2 + strlen(seg2) - 1;
+                        while (end2 > seg2 && (*end2 == ' ' || *end2 == '\t')) { *end2 = '\0'; --end2; }
+                        if (*seg2 == '\0') { seg2 = strtok_r(NULL, ";", &seg2_save); continue; }
+
+                        /* same handling - detect background & parse pipeline */
+                        int bg2 = 0;
+                        size_t l2 = strlen(seg2);
+                        if (l2 > 0 && seg2[l2-1] == '&') {
+                            bg2 = 1;
+                            char *q2 = seg2 + l2 - 1;
+                            *q2 = '\0';
+                            while (q2 > seg2 && (*(q2-1) == ' ' || *(q2-1) == '\t')) { --q2; *(q2) = '\0'; }
+                        }
+
+                        cmd_t *cmds = NULL;
+                        int ncmds = 0;
+                        if (parse_pipeline(seg2, &cmds, &ncmds) == 0) {
+                            char *copy = strdup(seg2);
+                            execute_pipeline(cmds, ncmds, bg2, copy);
+                            if (!bg2) free(copy);
+                            free_pipeline(cmds, ncmds);
+                        } else {
+                            fprintf(stderr, "Parse error in history expansion: %s\n", seg2);
+                        }
+
+                        seg2 = strtok_r(NULL, ";", &seg2_save);
                     }
-                    free(tmp);
+                    free(found_copy);
                     segment = strtok_r(NULL, ";", &saveptr);
                     continue;
                 } else {
@@ -505,10 +701,22 @@ void start_shell(void) {
         free(line);
     }
 
-    /* cleanup: reap and free history/jobs */
+    /* cleanup: reap and free history/jobs and variables */
     reap_finished_jobs();
     for (int i = 0; i < history_count; ++i) free(history_buf[i]);
     for (int i = 0; i < jobs_count; ++i) free(jobs[i].cmdline);
+    var_t *v = vars_head;
+    while (v) {
+        var_t *nx = v->next;
+        free(v->name);
+        free(v->value);
+        free(v);
+        v = nx;
+    }
 }
+
+
+
+
 
 
