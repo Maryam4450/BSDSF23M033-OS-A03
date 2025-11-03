@@ -1,10 +1,11 @@
 #include "shell.h"
 
-/* main simply starts the shell */
+/* main: initialize readline history and start shell loop */
 int main() {
-    /* Initialize readline history */
+    /* initialize readline history support */
     using_history();
-    rl_bind_key('\t', rl_complete); /* enable tab completion (default) */
+    /* enable tab completion (default readline handler) */
+    rl_bind_key('\t', rl_complete);
 
     start_shell();
     return 0;
